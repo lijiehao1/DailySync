@@ -1,0 +1,41 @@
+name: Sync Garmin CN to Garmin Global
+
+on:
+  workflow_dispatch:
+  schedule:
+    #  每6小时检查一次
+    - cron: "0 */6 * * *"
+  push:
+    branches:
+      - main
+
+env:
+  # please change to your own config.
+  RQ_COOKIE: ${{ secrets.RQ_COOKIE }}
+  RQ_CSRF_TOKEN: ${{ secrets.RQ_CSRF_TOKEN }}
+  RQ_USERID: ${{ secrets.RQ_USERID }}
+  GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+  GOOGLE_API_CLIENT_EMAIL: ${{ secrets.GOOGLE_API_CLIENT_EMAIL }}
+  GOOGLE_API_PRIVATE_KEY: ${{ secrets.GOOGLE_API_PRIVATE_KEY }}
+  BARK_KEY: ${{ secrets.BARK_KEY }}
+  GARMIN_USERNAME: ${{ secrets.GARMIN_USERNAME }}
+  GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+  GARMIN_GLOBAL_USERNAME: ${{ secrets.GARMIN_GLOBAL_USERNAME }}
+  GARMIN_GLOBAL_PASSWORD: ${{ secrets.GARMIN_GLOBAL_PASSWORD }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Sync Garmin CN to Garmin Global
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '14'
+          cache: 'yarn'
+      - run: yarn
+      - run: yarn sync_cn
+        timeout-minutes: 5
+      - uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: Save Garmin Session
