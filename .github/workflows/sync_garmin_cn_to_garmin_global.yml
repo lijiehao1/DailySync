@@ -69,13 +69,35 @@ jobs:
           config_dir="$RUNNER_TEMP/garmin-sync"
           mkdir -m 700 "$config_dir"
 
-          printf '%s' "$GARMIN_PASSWORD" |
-            garmin --config-dir "$config_dir" auth login \
-              --profile cn --region cn --email "$GARMIN_USERNAME" --password-stdin
+          login_with_retry() {
+            local profile="$1"
+            local region="$2"
+            local email_name="$3"
+            local password_name="$4"
+            local attempt
+            local delay
 
-          printf '%s' "$GARMIN_GLOBAL_PASSWORD" |
-            garmin --config-dir "$config_dir" auth login \
-              --profile global --region global --email "$GARMIN_GLOBAL_USERNAME" --password-stdin
+            for attempt in 1 2 3; do
+              if printf '%s' "${!password_name}" |
+                garmin --config-dir "$config_dir" auth login \
+                  --profile "$profile" --region "$region" \
+                  --email "${!email_name}" --password-stdin; then
+                return 0
+              fi
+
+              if [[ "$attempt" -eq 3 ]]; then
+                echo "::error::Garmin $region authentication failed after $attempt attempts"
+                return 1
+              fi
+
+              delay=$((attempt * 90))
+              echo "Garmin $region temporarily rejected login; retrying in ${delay}s"
+              sleep "$delay"
+            done
+          }
+
+          login_with_retry cn cn GARMIN_USERNAME GARMIN_PASSWORD
+          login_with_retry global global GARMIN_GLOBAL_USERNAME GARMIN_GLOBAL_PASSWORD
 
       - name: Sync activities
         shell: bash
