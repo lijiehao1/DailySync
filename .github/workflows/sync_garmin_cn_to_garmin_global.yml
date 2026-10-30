@@ -1,42 +1,132 @@
 name: Sync Garmin CN to Garmin Global
 
-#on:
-#  workflow_dispatch:
-#  schedule:
-#    #  每6小时检查一次
-#    - cron: "0 23 * * *"
-#    - cron: "0 9 * * *"
- # push:
- #   branches:
- #     - main
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Number of recent activities to compare
+        required: true
+        default: "30"
+        type: string
+      dry_run:
+        description: Preview without uploading
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    # Four times daily. GitHub cron uses UTC.
+    - cron: "17 */6 * * *"
 
-env:
-  # please change to your own config.
-  RQ_COOKIE: ${{ secrets.RQ_COOKIE }}
-  RQ_CSRF_TOKEN: ${{ secrets.RQ_CSRF_TOKEN }}
-  RQ_USERID: ${{ secrets.RQ_USERID }}
-  GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-  GOOGLE_API_CLIENT_EMAIL: ${{ secrets.GOOGLE_API_CLIENT_EMAIL }}
-  GOOGLE_API_PRIVATE_KEY: ${{ secrets.GOOGLE_API_PRIVATE_KEY }}
-  BARK_KEY: ${{ secrets.BARK_KEY }}
-  GARMIN_USERNAME: ${{ secrets.GARMIN_USERNAME }}
-  GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
-  GARMIN_GLOBAL_USERNAME: ${{ secrets.GARMIN_GLOBAL_USERNAME }}
-  GARMIN_GLOBAL_PASSWORD: ${{ secrets.GARMIN_GLOBAL_PASSWORD }}
+permissions:
+  contents: read
+
+concurrency:
+  group: garmin-cn-to-global
+  cancel-in-progress: false
 
 jobs:
-  build:
+  sync:
     runs-on: ubuntu-latest
-    name: Sync Garmin CN to Garmin Global
+    timeout-minutes: 20
+    env:
+      GARMIN_USERNAME: ${{ secrets.GARMIN_USERNAME }}
+      GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+      GARMIN_GLOBAL_USERNAME: ${{ secrets.GARMIN_GLOBAL_USERNAME }}
+      GARMIN_GLOBAL_PASSWORD: ${{ secrets.GARMIN_GLOBAL_PASSWORD }}
+      GARMIN_SYNC_VERSION: 5f277d889bff435a84f00ebb1c902cb0991682b9
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in GARMIN_USERNAME GARMIN_PASSWORD GARMIN_GLOBAL_USERNAME GARMIN_GLOBAL_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing GitHub Actions secret: $name"
+              missing=1
+            fi
+          done
+          [[ "$missing" -eq 0 ]]
+
+      - name: Install Go
+        uses: actions/setup-go@v6
         with:
-          node-version: '14'
-          cache: 'yarn'
-      - run: yarn
-      - run: yarn sync_cn
-        timeout-minutes: 5
-      - uses: stefanzweifel/git-auto-commit-action@v4
-        with:
-          commit_message: Save Garmin Session
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Build pinned Garmin sync client
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install "github.com/Andrewshihs/garmin-sync/cmd/garmin@${GARMIN_SYNC_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Authenticate both regions
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_dir="$RUNNER_TEMP/garmin-sync"
+          mkdir -m 700 "$config_dir"
+
+          login_with_retry() {
+            local profile="$1"
+            local region="$2"
+            local email_name="$3"
+            local password_name="$4"
+            local attempt
+            local delay
+
+            for attempt in 1 2 3; do
+              if printf '%s' "${!password_name}" |
+                garmin --config-dir "$config_dir" auth login \
+                  --profile "$profile" --region "$region" \
+                  --email "${!email_name}" --password-stdin; then
+                return 0
+              fi
+
+              if [[ "$attempt" -eq 3 ]]; then
+                echo "::error::Garmin $region authentication failed after $attempt attempts"
+                return 1
+              fi
+
+              delay=$((attempt * 90))
+              echo "Garmin $region temporarily rejected login; retrying in ${delay}s"
+              sleep "$delay"
+            done
+          }
+
+          login_with_retry cn cn GARMIN_USERNAME GARMIN_PASSWORD
+          login_with_retry global global GARMIN_GLOBAL_USERNAME GARMIN_GLOBAL_PASSWORD
+
+      - name: Sync activities
+        shell: bash
+        env:
+          INPUT_LIMIT: ${{ inputs.limit || '30' }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$INPUT_LIMIT" =~ ^[1-9][0-9]*$ ]] || (( INPUT_LIMIT > 500 )); then
+            echo "::error::limit must be an integer from 1 to 500"
+            exit 1
+          fi
+
+          args=(
+            --config-dir "$RUNNER_TEMP/garmin-sync"
+            sync
+            --source cn
+            --target global
+            --source-region cn
+            --target-region global
+            --limit "$INPUT_LIMIT"
+            --delay 5
+          )
+          if [[ "$INPUT_DRY_RUN" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          garmin "${args[@]}"
+
+      - name: Remove temporary credentials
+        if: always()
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/garmin-sync"

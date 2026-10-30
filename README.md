@@ -1,5 +1,7 @@
 # 佳明运动数据同步与采集工具
 
+> 中国区→国际区的 GitHub Actions 安全配置见 [GARMIN_SYNC_SETUP.md](./GARMIN_SYNC_SETUP.md)。
+
 
 
 ![workflow](./assets/workflow.png)
